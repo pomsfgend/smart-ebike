@@ -1,4 +1,0 @@
-version: "0.1.0"
-description: "GB/T fast-charge add-on bench firmware (ESP32-C3)"
-dependencies:
-  idf: ">=5.0.9,<5.1.0"   # same pin as FGMDCharge-FD-ROUND-V2

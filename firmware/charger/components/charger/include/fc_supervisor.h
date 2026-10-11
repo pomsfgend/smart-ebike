@@ -1,15 +1,15 @@
 #pragma once
 /*
- * Fast-charge supervisor: the "brain" that sits between the GB/T session (spoof) and the
- * DC-DC converter. Pure C, deterministic, host-tested. Called every FC_TASK_PERIOD_MS.
+ * Fast-charge supervisor of the charger controller ESP: the "brain" between the station
+ * data (received from the cube over the link) and the PSU stack. Pure C, deterministic, host-tested. Called every FC_TASK_PERIOD_MS.
  *
  * Source of truth = the two JBD BMSs. The station only provides HV power; its CML/CCS
  * values are used to choose a request it can actually deliver.
  *
  *   BMS x2 ──> per-pack limit (temp derate, cell taper, faults)
  *          ──> total current limit (current sharing between parallel packs)
- *          ──> DC-DC Iref (slew limited) + Vref (65.7 V)  [fast loop is in DC-DC hardware]
- *          ──> station request: BCL V = 400 V (in CML range), I = Pin/V * 1.15
+ *          ──> stack Iref (slew limited) + Vref (65.7 V)  [fast loop is inside the Flatpack]
+ *          ──> station request (sent to the cube -> BCL): V = 250 V in CML range, I = Pin/V*1.15
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,9 +42,12 @@ typedef struct {
     const fc_bms_t      *bms;       /* [2] */
     const fc_dcdc_tel_t *dcdc;
     const fc_station_t  *station;
-    bool cc2_ok;
+    bool cc2_ok;                    /* true if CC2 sense not fitted                        */
     bool user_stop;
-    bool power_path_ready;          /* contactors closed, station delivering (CCS permit) */
+    bool station_end;               /* cube reports CST/CEM or session STOPPING             */
+    uint32_t link_age_ms;           /* age of last STATION frame                           */
+    uint16_t stack_i_max_0p1a;      /* PSU power limit at present voltage (strings x FP2)  */
+    bool power_path_ready;          /* K-BAT closed, PSUs online, station delivering       */
 } fc_sup_in_t;
 
 typedef struct {
@@ -60,5 +63,5 @@ void fc_supervisor_step(fc_supervisor_t *s, const fc_sup_in_t *in, uint32_t now_
 
 /* Station voltage/current request for BCL (also used before charging for BCP/BHM sanity). */
 fc_hv_request_t fc_hv_request(const fc_station_t *st, uint16_t pout_w);
-/* Can this station be used at all (CML window overlaps the DC-DC input window)? */
+/* Can this station be used at all (CML window overlaps the PSU DC input window)? */
 bool fc_station_compatible(const fc_station_t *st);

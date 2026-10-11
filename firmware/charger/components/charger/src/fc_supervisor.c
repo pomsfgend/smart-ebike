@@ -1,5 +1,6 @@
 #include "fc_supervisor.h"
 #include "fc_config.h"
+#include "fc_link.h"
 #include <string.h>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -8,7 +9,7 @@
 const char *fc_stop_reason_name(fc_stop_reason_t r)
 {
     static const char *n[] = { "none", "full", "cell_ov", "pack_ov", "temp", "bms_fault",
-        "bms_lost", "dcdc_fault", "dcdc_lost", "pack_imbalance", "station_range", "cc2_lost", "user" };
+        "bms_lost", "dcdc_fault", "dcdc_lost", "pack_imbalance", "station_range", "cc2_lost", "user", "link_lost", "station_end", "precharge" };
     return (unsigned)r < sizeof(n) / sizeof(n[0]) ? n[r] : "?";
 }
 
@@ -93,18 +94,18 @@ void fc_limits_compute(const fc_bms_t bms[2], uint32_t now, fc_limits_t *o)
 bool fc_station_compatible(const fc_station_t *st)
 {
     if (!st->cml_valid) return false;
-    return st->cml_vmin_0p1v <= FC_DCDC_VIN_MAX_0P1V && st->cml_vmax_0p1v >= FC_DCDC_VIN_MIN_0P1V;
+    return st->cml_vmin_0p1v <= FC_STACK_VIN_MAX_0P1V && st->cml_vmax_0p1v >= FC_STACK_VIN_MIN_0P1V;
 }
 
 fc_hv_request_t fc_hv_request(const fc_station_t *st, uint16_t pout_w)
 {
     fc_hv_request_t r = { .v_0p1v = FC_HV_REQ_V_0P1V, .i_0p1a = 0, .mode = FC_HV_BCL_MODE };
-    uint16_t vlo = FC_DCDC_VIN_MIN_0P1V, vhi = FC_DCDC_VIN_MAX_0P1V;
+    uint16_t vlo = FC_STACK_VIN_MIN_0P1V, vhi = FC_STACK_VIN_MAX_0P1V;
     if (st->cml_valid) { vlo = MAX(vlo, st->cml_vmin_0p1v); vhi = MIN(vhi, st->cml_vmax_0p1v); }
     if (vlo > vhi) return r;                     /* incompatible, caller must stop */
     r.v_0p1v = MIN(MAX(r.v_0p1v, vlo), vhi);
     /* Pin = Pout / eff; I = Pin / V; + margin. 0.1 A units: I*10 = P*10/V. */
-    uint32_t pin_w = (uint32_t)pout_w * 100u / FC_DCDC_EFF_PCT;
+    uint32_t pin_w = (uint32_t)pout_w * 100u / FC_STACK_EFF_PCT;
     uint32_t i = pin_w * 100u / r.v_0p1v;                       /* 0.1 A (P*10 / (V/10) /10) */
     i = i * (100u + FC_HV_I_MARGIN_PCT) / 100u + FC_HV_I_MARGIN_MIN_0P1A;
     i = MIN(i, (uint32_t)FC_HV_I_REQ_MAX_0P1A);
@@ -133,9 +134,11 @@ void fc_supervisor_step(fc_supervisor_t *s, const fc_sup_in_t *in, uint32_t now,
 
     if (s->stop == FC_STOP_NONE && s->running) {
         if (in->user_stop) s->stop = FC_STOP_USER;
+        else if (in->link_age_ms > FCL_STOP_MS) s->stop = FC_STOP_LINK_LOST;
+        else if (in->station_end) s->stop = FC_STOP_STATION_END;
         else if (!in->cc2_ok) s->stop = FC_STOP_CC2_LOST;
-        else if (!in->dcdc->valid || now - in->dcdc->rx_ms > FC_DCDC_STALE_MS) s->stop = FC_STOP_DCDC_LOST;
-        else if (in->dcdc->fault || in->dcdc->temp_dc >= FC_DCDC_T_TRIP_DC) s->stop = FC_STOP_DCDC_FAULT;
+        else if (in->power_path_ready && (!in->dcdc->valid || now - in->dcdc->rx_ms > FC_PSU_STALE_MS)) s->stop = FC_STOP_DCDC_LOST;
+        else if (in->dcdc->fault || in->dcdc->temp_dc >= FC_PSU_T_TRIP_C * 10) s->stop = FC_STOP_DCDC_FAULT;
         else if (o->lim.stop != FC_STOP_NONE &&
                  !(o->lim.stop == FC_STOP_PACK_IMBALANCE && s->iref_0p1a > 0)) s->stop = o->lim.stop;
         else if (in->station->cml_valid && !fc_station_compatible(in->station)) s->stop = FC_STOP_STATION_RANGE;
@@ -150,12 +153,9 @@ void fc_supervisor_step(fc_supervisor_t *s, const fc_sup_in_t *in, uint32_t now,
 
     /* Target current */
     uint32_t target = o->lim.total_lim_0p1a;
-    if (in->dcdc->vout_0p1v > 100) {             /* power limit of the converter */
-        uint32_t ip = (uint32_t)FC_DCDC_POUT_MAX_W * 100u / in->dcdc->vout_0p1v;
-        target = MIN(target, ip);
-    }
-    if (in->dcdc->temp_dc >= FC_DCDC_T_DERATE_DC) target /= 2u;
-    if (!in->power_path_ready) target = 0;
+    target = MIN(target, (uint32_t)in->stack_i_max_0p1a);   /* PSU power limit (by caller) */
+    if (in->dcdc->temp_dc >= FC_PSU_T_DERATE_C * 10) target /= 2u;
+    if (!in->power_path_ready || in->link_age_ms > FCL_PAUSE_MS) target = 0;   /* pause */
 
     /* Slew: up limited, down immediate */
     uint32_t up = (uint32_t)FC_I_SLEW_0P1A_PER_S * dt / 1000u;
@@ -184,6 +184,6 @@ void fc_supervisor_step(fc_supervisor_t *s, const fc_sup_in_t *in, uint32_t now,
     /* Ask the station for the power we plan to draw soon (target, not slewed value), so the
        station is never the limiting element. */
     uint32_t pout = (uint32_t)MAX(target, s->iref_0p1a) * FC_PACK_CV_0P1V / 100u;
-    o->hv = fc_hv_request(in->station, (uint16_t)MIN(pout, (uint32_t)FC_DCDC_POUT_MAX_W));
+    o->hv = fc_hv_request(in->station, (uint16_t)MIN(pout, 60000u));
     o->stop = s->stop;
 }

@@ -1,0 +1,14 @@
+menu "FC charger controller"
+config FC_PEER_MAC
+    string "MAC of the cube (FGMDCharge) Wi-Fi STA/AP interface used for ESP-NOW"
+    default "00:00:00:00:00:00"
+config FC_PMK
+    string "ESP-NOW primary master key (exactly 16 chars, same on the cube)"
+    default "CHANGE_ME_PMK_16"
+config FC_LMK
+    string "ESP-NOW local master key, 32 hex chars (same on the cube)"
+    default "00112233445566778899aabbccddeeff"
+config FC_CC2_SENSE
+    bool "CC2 sense divider fitted on GPIO1"
+    default n
+endmenu

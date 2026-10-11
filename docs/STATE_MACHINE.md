@@ -1,66 +1,82 @@
 # Машины состояний
 
-Два уровня:
-1. **Сессия GB/T** — уже есть в обманке (`sm_relay.c`, состояния 0…7 из `app_state.h`). Мы её не переписываем,
-   а добавляем условия (жёлтые пометки «FC:»).
-2. **Силовой путь fastcharge** — внутри компонента (`fc_core.c`, `fc_task.c`, `fc_supervisor.c`).
+Ревизия 2: две независимые машины на двух платах, связанные только протоколом FCL (ESP-NOW).
 
-## 1. Сессия (обманка + хуки fastcharge)
+## 1. Кубик (FGMDCharge `sm_relay.c`) — что меняется
 
-```mermaid
-stateDiagram-v2
-    [*] --> ST_IDLE
-    ST_IDLE --> ST_HANDSHAKE_INIT: CAN от станции (авто) / sm_start_session()<br/>FC: fc_on_session_state(HANDSHAKE)
-    ST_HANDSHAKE_INIT --> ST_WAIT_CRM
-    ST_WAIT_CRM --> ST_PARAM_CONFIG: CRM 0xAA (BHM/BRM отправлены)<br/>FC: BHM/BRM из fc_fill_bhm()/fc_fill_brm()
-    ST_WAIT_CRM --> ST_IDLE: 30 с без CRM → BEM
-    ST_PARAM_CONFIG --> ST_READY_WAIT_CRO: CML получен (BCP отправлен)<br/>FC: BCP из fc_fill_bcp();<br/>FC: если CML вне окна DC-DC → BST, стоп
-    ST_PARAM_CONFIG --> ST_IDLE: 20 с без CML → BEM
-    ST_READY_WAIT_CRO --> ST_CHARGING: CRO 0xAA<br/>FC: BRO=0xAA только при fc_ready_for_bro()
-    ST_READY_WAIT_CRO --> ST_IDLE: 30 с без CRO → BEM
-    ST_CHARGING --> ST_STOP: CST / CEM / CSD / пользователь / CAN молчит 3 с<br/>FC: fc_stop_requested() → BST с причиной
-    ST_STOP --> ST_FINALIZE: FC (TODO обманки): BST каждые 10 мс до CST, BSD до CSD, ток < 5 А
-    ST_FINALIZE --> ST_IDLE: реле A/B выкл.
-```
-
-Реле обманки в режиме быстрой зарядки:
-- **ST_READY_WAIT_CRO (вход):** реле A (GPIO6) — предзаряд ВВ-входа DC-DC.
-- **ST_CHARGING:** когда напряжение CCS ≥ 50 В стабильно 3 с — реле B (GPIO7) = K5/K6, реле A выкл. (существующая логика `s_load_on`/`s_handoff`).
-  Изменить: порог CCS ≥ `FC_DCDC_VIN_MIN` (250 В), а не 50 В.
-- **IDLE/STOP/FINALIZE:** оба выкл. В режиме быстрой зарядки **отключить** ручное «удержание нагрузки» (`sm_request_relay_test`)
-  и BLE-команду 0x66 — это прямое управление ВВ-контактором.
-
-## 2. Силовой путь (fastcharge)
+Логика кубика остаётся, добавлены только условия (выделены **жирным**, номера правок — INTEGRATION §5).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> OFF
-    OFF --> BAT_PRECHARGE: сессия READY, обе BMS свежие, нет защит, CC2 = 6 В
-    BAT_PRECHARGE --> BAT_CLOSED: |Vout − Vbat| < 2 В за ≤ 2 с → K-BAT вкл., предзаряд выкл.
-    BAT_PRECHARGE --> OFF: тайм-аут предзаряда
-    BAT_CLOSED --> WAIT_HV: fc_ready_for_bro() = true → обманка шлёт BRO 0xAA
-    WAIT_HV --> RAMP: ST_CHARGING, K5/K6 (реле B) вкл., CCS свежий и разрешение = 01, Vin ≥ 250 В
-    RAMP --> CC: Iref дошёл до лимита (рост 10 А/с)
-    CC --> CV: Vout ≈ 65,7 В (аппаратный CV), ток падает сам
-    CV --> DONE: ток < 3 А в течение 60 с
-    RAMP --> PAUSE: CCS разрешение = 00 / CCS устарел > 1 с / Vin < 250 В
-    CC --> PAUSE
-    CV --> PAUSE
-    PAUSE --> RAMP: условия восстановились (Iref снова с 0)
-    RAMP --> FAULT: защита BMS, перегрев, FAULT DC-DC, CC2 ≠ 6 В, BMS молчит > 2 с
-    CC --> FAULT
-    CV --> FAULT
-    DONE --> SHUTDOWN
-    FAULT --> SHUTDOWN
-    SHUTDOWN --> OFF: EN=0 → Iref=0 → ждать I < 1 А → K5/K6 (обманка) → K-BAT
+    [*] --> IDLE
+    IDLE --> HANDSHAKE_INIT: старт / станция на CAN
+    HANDSHAKE_INIT --> WAIT_CRM
+    WAIT_CRM --> PARAM_CONFIG: CRM 0xAA (BHM max = 275 В — правка 4)
+    PARAM_CONFIG --> READY_WAIT_CRO: CML получен (BCP max = 275 В)
+    READY_WAIT_CRO --> CHARGING: CRO 0xAA
+    note right of READY_WAIT_CRO
+      BRO 0x00 первые 2 с,
+      затем 0xAA ТОЛЬКО если REQUEST.READY свежий (правка 5)
+    end note
+    CHARGING --> STOP: CST / CEM / тишина CAN 3 с / кнопка
+    CHARGING --> STOP: REQUEST.STOP или связь > 1 с (правка 9) → BST с причиной
+    READY_WAIT_CRO --> STOP: REQUEST.STOP (правка 10)
+    STOP --> FINALIZE --> IDLE
 ```
 
-Порядок выключения всегда: **DC-DC EN = 0 → ток = 0 → контакторы**. Никогда не размыкать контактор под током.
+В `CHARGING` каждые 10 мс `fc_cube_link_tick()`: шлёт STATION раз в 100 мс; свежий REQUEST →
+`app_state_set_bcl / set_battery_vi / set_soc` → существующие `tx_bcl/tx_bcs` отправляют реальные запросы;
+REQUEST старше 300 мс → BCL I = 0 и BSM «не разрешено».
 
-## 3. Соответствие кода
+## 2. Контроллер зарядки (`charger_core.c`)
 
-| Состояние | Где в коде |
-|---|---|
-| OFF / BAT_PRECHARGE / BAT_CLOSED | `fc_task()` — `want_k`, `fc_precharge_set()`, `fc_batt_contactor_set()` |
-| WAIT_HV / RAMP / CC / CV / PAUSE | `fc_supervisor_step()` — `power_path_ready`, ограничение скорости роста `iref_0p1a`, аппаратный CV через `vref_0p1v` |
-| DONE / FAULT | `fc_supervisor_t.stop` (защёлка) → `fc_stop_requested()` → BST |
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> ARMED: session = HANDSHAKE..READY
+    ARMED --> IDLE: связь > 1 с или session = IDLE
+    note right of ARMED
+      READY = BMS ок и окно CML ≤ 270 В
+      PERMIT = READY и session ≥ READY
+    end note
+    ARMED --> WAIT_HV: session = CHARGING и READY
+    ARMED --> DONE: session = CHARGING, но не READY (station_range / причина BMS)
+    WAIT_HV --> MATCH: Flatpack Vin 190..270 В, CRPS запущен (Vstack − Vfp ≈ 12 В)
+    MATCH --> CHARGING: Vbat ≤ Vstack ≤ max(Vbat, 55,7 В) + 2 В → K-BAT
+    CHARGING --> RAMPDOWN: стоп супервизора / связь > 1 с / станция завершает
+    WAIT_HV --> RAMPDOWN: 30 с без входа или любой стоп
+    MATCH --> RAMPDOWN: 10 с без совпадения (precharge)
+    RAMPDOWN --> DONE: ток < 1 А (не раньше 300 мс) или 2 с
+    DONE --> IDLE: session = IDLE
+```
+
+| Состояние | K-BAT | PERMIT | CRPS | Flatpack U / I | REQUEST |
+|---|---|---|---|---|---|
+| IDLE | 0 | 0 | 0 | — | READY 0 |
+| ARMED | 0 | READY ∧ session ≥ READY | 0 | — | READY по проверкам, BCL I = 0 |
+| WAIT_HV | 0 | 1 | 1, как только есть Vin | 43,5 В / 2 А | ALLOW, BCL I = минимум (1 А + 15 %) |
+| MATCH | 0 → 1 | 1 | 1 | Vbat − Vcrps / 2 А | ALLOW |
+| CHARGING | 1 | 1 | 1 | 65,7 − Vcrps / Iref ÷ нитки | ALLOW, BCL I = (P / 0,9 / U) × 1,15 + 1 А |
+| RAMPDOWN | 1 → 0 | 1 → 0 | 1 → 0 | 43,5 В / 0 | STOP + причина |
+| DONE | 0 | 0 | 0 | — | STOP |
+
+## 3. Супервизор тока (внутри CHARGING, `fc_supervisor.c`)
+
+1. Для каждой JBD: протухла > 2 с → стоп `bms_lost`; флаг защиты / выключен MOSFET заряда → `bms_fault`;
+   ячейка ≥ 3,70 В → `cell_ov`; температура вне 0…55 °C → `temp`.
+2. Лимит пакета: 50 А × коэффициент температуры (20 / 50 / 100 / 50 / 20 %) × сужение по ячейке 3,55 → 3,65 В;
+   ячейка < 2,5 В → 5 А.
+3. Общий лимит с учётом неравного деления тока между параллельными пакетами.
+4. Ограничение блоков: min(37 А × ниток, мощность Flatpack при текущем U); Flatpack горячее 60 °C → половина.
+5. Связь > 300 мс → цель 0 А (пауза), > 1 с → стоп `link_lost`.
+6. Рост ≤ 10 А/с, снижение мгновенно. Конец: U ≥ 65,4 В и ток < 3 А 60 с → `full`.
+
+## 4. Отказы (кто что делает)
+
+| Событие | Контроллер | Кубик | Железо |
+|---|---|---|---|
+| Пропало радио | 300 мс: 0 А; 1 с: K-BAT, PERMIT ↓ | 300 мс: BCL 0 А; 1 с: BST, реле ↓ | K5/K6 отпадают от PERMIT |
+| Завис контроллер | — | REQUEST пропал → как выше | драйверы K-BAT/PERMIT отпускают за ~50 мс; Flatpack через 15 с → 43,5 В |
+| Завис кубик | STATION пропал → как выше | — | станция: нет BCL 1 с → стоп |
+| Выдернули разъём | Vin пропал / связь | A+ пропал, кубик обесточен | K5/K6 без питания катушек |
+| Станция подняла U > 275 В | Vin от Flatpack > 275 В → стоп `station_range`, ток 0, K-BAT ↓ | BST | Flatpack отключается > 300 В; предохранители |

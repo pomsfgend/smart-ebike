@@ -23,15 +23,15 @@ typedef struct {
     bool     cells_valid;
 } fc_bms_t;
 
-/* DC-DC telemetry and command (analog/I2C or CAN module, see dcdc_if.h). */
+/* Power-stack telemetry and command (Flatpack2 + CRPS, aggregated over strings). */
 typedef struct {
     bool     valid;
     uint32_t rx_ms;
-    uint16_t vin_0p1v;
-    uint16_t vout_0p1v;
+    uint16_t vin_0p1v;         /* PSU DC input = station voltage (Flatpack report) */
+    uint16_t vout_0p1v;        /* stack output (ADC), before battery contactor     */
     int16_t  iout_0p1a;
     int16_t  temp_dc;
-    bool     fault;            /* hardware fault latch of the power stage */
+    bool     fault;            /* Flatpack alarm / CRPS not running              */
     bool     enabled;
 } fc_dcdc_tel_t;
 
@@ -41,7 +41,7 @@ typedef struct {
     uint16_t iref_0p1a;        /* hardware CC setpoint (total)              */
 } fc_dcdc_cmd_t;
 
-/* What the station advertised (CML) and is doing (CCS). Filled by the GB/T layer. */
+/* What the station advertised (CML) and is doing (CCS). Received from the cube via the link. */
 typedef struct {
     bool     cml_valid;
     uint16_t cml_vmax_0p1v, cml_vmin_0p1v;
@@ -71,9 +71,12 @@ typedef enum {
     FC_STOP_DCDC_FAULT,
     FC_STOP_DCDC_LOST,
     FC_STOP_PACK_IMBALANCE,
-    FC_STOP_STATION_RANGE,     /* station cannot supply a voltage inside the DC-DC window */
+    FC_STOP_STATION_RANGE,     /* station cannot supply a voltage inside the PSU DC input window */
     FC_STOP_CC2_LOST,
     FC_STOP_USER,
+    FC_STOP_LINK_LOST,         /* cube link silent > FCL_STOP_MS               */
+    FC_STOP_STATION_END,       /* station ended the session (CST/CEM) or cube stopping */
+    FC_STOP_PRECHARGE,         /* battery-side precharge failed                */
 } fc_stop_reason_t;
 
 const char *fc_stop_reason_name(fc_stop_reason_t r);

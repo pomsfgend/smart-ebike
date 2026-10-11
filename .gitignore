@@ -5,3 +5,8 @@ firmware/managed_components/
 firmware/dependencies.lock
 firmware/host_tests/run_tests
 *.o
+firmware/charger/build/
+firmware/charger/sdkconfig
+firmware/charger/sdkconfig.old
+firmware/charger/managed_components/
+firmware/charger/dependencies.lock
