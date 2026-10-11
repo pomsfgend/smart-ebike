@@ -15,3 +15,11 @@ cube's BAM transfers for BRM/BCP/BCS. It is not required for the link.
 
 With no charger MAC configured, `fc_cube_link_init()` does nothing and the cube behaves exactly
 as before (stock spoof).
+
+## Ревизия 3: прямой режим (FCL v2)
+
+* `FCL_VERSION` = 2: прошивки кубика и контроллера обновлять вместе (кадры v1 отбрасываются).
+* Новая функция `fc_cube_fill_bcp()` — BCP из REQUEST при флаге `FCL_RF_DIRECT` (правка 15 в
+  docs/INTEGRATION_WITH_SPOOF.md): 3,65 В/ячейку, 100 А, макс. 100 В, реальное U батареи.
+* Правка 16 (`tx_bcl()`: U не ниже CML min) полезна и без контроллера.
+* BST при потере связи: `00 00 40 00` («другой отказ»), как у заводской прошивки.

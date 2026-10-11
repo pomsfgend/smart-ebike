@@ -77,6 +77,9 @@ typedef enum {
     FC_STOP_LINK_LOST,         /* cube link silent > FCL_STOP_MS               */
     FC_STOP_STATION_END,       /* station ended the session (CST/CEM) or cube stopping */
     FC_STOP_PRECHARGE,         /* battery-side precharge failed                */
+    FC_STOP_OVERCURRENT,       /* direct mode: battery current above limit     */
+    FC_STOP_INLET,             /* direct mode: inlet voltage/contactor check   */
+    FC_STOP_HW_OVP,            /* direct mode: hardware OVP comparator tripped */
 } fc_stop_reason_t;
 
 const char *fc_stop_reason_name(fc_stop_reason_t r);

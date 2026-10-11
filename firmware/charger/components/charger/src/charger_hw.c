@@ -45,6 +45,10 @@ esp_err_t chw_init(void)
     ESP_ERROR_CHECK(gpio_config(&g));
     gpio_config_t b = { .pin_bit_mask = 1ULL << FC_PIN_USER_BTN, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
     ESP_ERROR_CHECK(gpio_config(&b));
+#if FC_POWER_MODE == FC_POWER_MODE_DIRECT
+    gpio_config_t ov = { .pin_bit_mask = 1ULL << FC_PIN_HW_OVP_OK, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
+    ESP_ERROR_CHECK(gpio_config(&ov));
+#endif
 
     ledc_timer_config_t t = { .speed_mode = LEDC_LOW_SPEED_MODE, .duty_resolution = LEDC_TIMER_10_BIT,
                               .timer_num = LEDC_TIMER_0, .freq_hz = FC_DRV_TOGGLE_HZ, .clk_cfg = LEDC_AUTO_CLK };
@@ -64,6 +68,7 @@ esp_err_t chw_init(void)
     ESP_ERROR_CHECK(uart_up(UART_NUM_0, FC_PIN_BMS1_TX, FC_PIN_BMS1_RX));
     ESP_ERROR_CHECK(uart_up(UART_NUM_1, FC_PIN_BMS2_TX, FC_PIN_BMS2_RX));
 
+#if FC_POWER_MODE == FC_POWER_MODE_DCDC
     twai_general_config_t gc = TWAI_GENERAL_CONFIG_DEFAULT(FC_PIN_CAN_TX, FC_PIN_CAN_RX, TWAI_MODE_NORMAL);
     gc.rx_queue_len = 32;
     twai_timing_config_t tc = TWAI_TIMING_CONFIG_125KBITS();
@@ -71,6 +76,9 @@ esp_err_t chw_init(void)
     ESP_ERROR_CHECK(twai_driver_install(&gc, &tc, &fc));
     ESP_ERROR_CHECK(twai_start());
     FC_LOGI(TAG, "hw up: 2x JBD UART, Flatpack CAN 125k, drivers off");
+#else
+    FC_LOGI(TAG, "hw up (DIRECT): 2x JBD UART, Vinlet ADC, HW-OVP input, drivers off");
+#endif
     return ESP_OK;
 }
 
@@ -85,9 +93,9 @@ uint16_t chw_vstack_0p1v(void)
 {
     int raw = 0, acc = 0;
     for (int i = 0; i < 8; ++i) { adc_oneshot_read(s_adc, ADC_CHANNEL_0, &raw); acc += raw; }
-    /* TODO: use adc_cali; divider 1:25.9 (100k / 4.02k), 12 bit, ~3.1 V full scale (VERIFY) */
+    /* TODO: use adc_cali; 12 bit, ~3.1 V full scale (VERIFY); divider FC_VSENSE_DIV_X10 / 10 */
     uint32_t mv = (uint32_t)acc / 8u * 3100u / 4095u;
-    return (uint16_t)(mv * 259u / 1000u);      /* 0.1 V: mv*25.9/100 */
+    return (uint16_t)(mv * FC_VSENSE_DIV_X10 / 1000u);   /* 0.1 V */
 }
 
 bool chw_cc2_ok(void)
@@ -102,6 +110,15 @@ bool chw_cc2_ok(void)
 }
 
 bool chw_user_button(void) { return gpio_get_level(FC_PIN_USER_BTN) == 0; }
+
+bool chw_hw_ovp_tripped(void)
+{
+#if FC_POWER_MODE == FC_POWER_MODE_DIRECT
+    return gpio_get_level(FC_PIN_HW_OVP_OK) != 0;
+#else
+    return false;
+#endif
+}
 
 static esp_err_t transact(uart_port_t port, uint8_t cmd, fc_bms_t *b)
 {

@@ -20,7 +20,7 @@
 #ifndef FC_CUBE_LMK
 #define FC_CUBE_LMK       { 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff }
 #endif
-#define FC_CUBE_BHM_VMAX_DEFAULT 2750u
+#define FC_CUBE_BHM_VMAX_DEFAULT 1000u   /* direct mode default; DCDC mode sends 2750 over FCL */
 
 static const char *TAG = "FCLINK";
 static const uint8_t s_peer[6] = FC_CUBE_PEER_MAC;
@@ -159,7 +159,9 @@ bool fc_cube_stop_requested(uint32_t now, uint8_t bst[4])
     if (!s_enabled) return false;
     memset(bst, 0, 4);
     if (age(now) > FCL_STOP_MS) {             /* link lost: "other fault" */
-        bst[1] = 0x00; bst[2] = 0x04;         /* VERIFY bit position for "other fault" */
+        /* fault word (bytes 2-3, LE) bits 15-16 = 01 "other fault" -> byte 3 = 0x40.
+           Same as the factory firmware's fixed BST 40 00 40 00 (docs/PROTOCOL_LIMITS.md §3). */
+        bst[1] = 0x00; bst[2] = 0x40;
         return true;
     }
     if (!(s_req.flags & FCL_RF_STOP)) return false;
@@ -182,6 +184,24 @@ bool fc_cube_fill_bsm(uint32_t now, uint8_t d[7])
     d[3] = (uint8_t)(r->tmin_c + 50);
     d[4] = r->tmin_no ? r->tmin_no : 1;
     d[5] = (uint8_t)bits; d[6] = (uint8_t)(bits >> 8);
+    return true;
+}
+
+/* DIRECT mode (FCL v2, REQUEST.flags & FCL_RF_DIRECT): the 13-byte BCP comes from the charger.
+   Returns false if the charger has not asked for it (keep the cube's own BCP). */
+bool fc_cube_fill_bcp(uint32_t now, uint8_t b[13])
+{
+    if (!s_enabled || age(now) > FCL_PAUSE_MS || !(s_req.flags & FCL_RF_DIRECT)) return false;
+    const fcl_request_t *r = &s_req;
+    uint16_t imax = (uint16_t)(4000u - (r->bcp_imax > 4000u ? 4000u : r->bcp_imax));   /* -400 A offset */
+    uint16_t soc01 = (uint16_t)r->soc * 10u;
+    b[0] = (uint8_t)r->bcp_cell_cv; b[1] = (uint8_t)(r->bcp_cell_cv >> 8);     /* 0.01 V        */
+    b[2] = (uint8_t)imax;           b[3] = (uint8_t)(imax >> 8);
+    b[4] = 0x50; b[5] = 0x00;       /* rated energy 8.0 kWh (0.1 kWh/bit) VERIFY per pack     */
+    b[6] = (uint8_t)r->bhm_vmax;    b[7] = (uint8_t)(r->bhm_vmax >> 8);         /* max total V   */
+    b[8] = (uint8_t)(55 + 50);      /* max allowed battery temperature 55 C                     */
+    b[9] = (uint8_t)soc01;          b[10] = (uint8_t)(soc01 >> 8);
+    b[11] = (uint8_t)r->batt_v;     b[12] = (uint8_t)(r->batt_v >> 8);          /* REAL pack V   */
     return true;
 }
 

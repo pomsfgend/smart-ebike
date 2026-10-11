@@ -69,6 +69,37 @@
 #define FC_HV_I_REQ_MAX_0P1A          (150 * FC_STACK_STRINGS)   /* 15 A per string @ 250 V */
 #define FC_HV_BCL_MODE                0x01   /* 0x01 = constant voltage, 0x02 = constant current */
 
+
+/* ---------------- DIRECT mode (primary since rev 3, docs/DIRECT_MODE.md) --------------
+ * No DC-DC: the station output is connected to the battery through K-BAT. The station
+ * is used as a current source: BCL requests a voltage >= CML min (a compliant 2023
+ * station sends CST if BCL V < CML min, GB/T 27930-2023 11.3.1) and the CURRENT we want.
+ * The battery clamps the bus to its own voltage; CV/taper is done by us via BCL current. */
+#define FC_POWER_MODE_DIRECT          1
+#define FC_POWER_MODE_DCDC            2
+#ifndef FC_POWER_MODE
+#define FC_POWER_MODE                 FC_POWER_MODE_DIRECT
+#endif
+#define FC_D_BCL_MODE                 0x02   /* CC: I = demand, V <= demand. Factory fw used 0x01 */
+#define FC_D_BCP_VMAX_0P1V            1000   /* BHM/BCP max total V = 100 V (VERIFY per station)  */
+#define FC_D_BCP_CELL_CV              365    /* 3.65 V in 0.01 V                                  */
+#define FC_D_BCP_IMAX_0P1A            FC_TOTAL_I_MAX_0P1A
+#define FC_D_I_USER_MAX_0P1A          FC_TOTAL_I_MAX_0P1A   /* web/UI cap, runtime-settable  */
+#define FC_D_I_START_0P1A             50     /* first request after K1/K2 close: 5 A          */
+#define FC_D_CV_KP_0P1A_PER_0P1V      20     /* CV loop: -2 A per 0.1 V above 65.7 V per step  */
+#define FC_D_OCP_MARGIN_0P1A          50     /* soft OCP: I > limit + max(5 A, 10 %) ...       */
+#define FC_D_OCP_PCT                  10
+#define FC_D_OCP_SOFT_MS              1000   /* ... for 1 s -> cut request                     */
+#define FC_D_OCP_HARD_MS              2000   /* ... for 2 s -> stop                            */
+#define FC_D_STATION_OVERSHOOT_0P1A   50     /* CCS I > BCL I + 5 A + 10 % for 2 s -> stop     */
+#define FC_D_INLET_SAFE_0P1V          600    /* <= 60 V: IMD finished/discharged (B.4.2)       */
+#define FC_D_INLET_SETTLE_MS          500
+#define FC_D_CLOSE_CHECK_MS           300    /* after K-BAT close: inlet must equal pack       */
+#define FC_D_CLOSE_DV_0P1V            20     /* +-2 V                                          */
+#define FC_D_MIN_I_STOP_MS            30000  /* need < CML imin for 30 s in CV -> stop (full)  */
+#define FC_D_RAMP_SOFT_MS             2000   /* normal stop: wait |I| < 1 A up to 2 s          */
+#define FC_D_RAMP_HARD_MS             300    /* fault stop: open after 300 ms (B.3.7.2)        */
+
 /* ---------------- Timing ---------------------------------------------------------- */
 #define FC_TASK_PERIOD_MS             100
 #define FC_BMS_POLL_MS                250    /* per BMS                                         */
@@ -89,7 +120,12 @@
 
 /* ---------------- Charger controller pins: ESP32-C3 SuperMini ------------------------
  * Console = USB-Serial-JTAG (GPIO18/19), so UART0 and UART1 are both free for the BMSs. */
-#define FC_PIN_VSTACK_ADC             0      /* ADC1_CH0, divider 1:25 (100k/4.02k), VERIFY     */
+#define FC_PIN_VSTACK_ADC             0      /* ADC1_CH0. DCDC: Vstack 1:25.9. DIRECT: Vinlet 1:51  */
+#if FC_POWER_MODE == FC_POWER_MODE_DIRECT
+#define FC_VSENSE_DIV_X10             510    /* 3x330k + 20k -> 158 V full scale, clamp above   */
+#else
+#define FC_VSENSE_DIV_X10             259    /* 100k / 4.02k                                     */
+#endif
 #define FC_PIN_CC2_ADC                1      /* ADC1_CH1, optional CC2 sense (see HARDWARE.md)  */
 #define FC_PIN_CRPS_PSON_N            2      /* via optocoupler; strap pull-up = PSU OFF         */
 #define FC_PIN_KBAT_DRV               3      /* dynamic drive (1 kHz) -> charge pump -> coil    */
@@ -99,7 +135,9 @@
 #define FC_PIN_BMS2_RX                7
 #define FC_PIN_HV_PERMIT_DRV          8      /* dynamic drive -> relay in series with K5/K6 coil */
 #define FC_PIN_USER_BTN               9      /* BOOT button: press = user stop (active low)     */
-#define FC_PIN_SPARE                  10     /* spare (optional precharge relay / fan / buzzer) */
+#define FC_PIN_SPARE                  10     /* DCDC mode: spare. DIRECT mode: FC_PIN_HW_OVP_OK  */
+#define FC_PIN_HW_OVP_OK              10     /* DIRECT: LOW = hardware OVP healthy (opto on);
+                                                broken wire / tripped = HIGH (pull-up) = stop      */
 #define FC_PIN_BMS1_TX                21     /* UART0 -> isolator -> JBD #1                     */
 #define FC_PIN_BMS1_RX                20
 #define FC_BMS_UART_BAUD              9600

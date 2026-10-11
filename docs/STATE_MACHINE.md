@@ -1,6 +1,43 @@
 # Машины состояний
 
-Ревизия 2: две независимые машины на двух платах, связанные только протоколом FCL (ESP-NOW).
+Ревизия 3: две независимые машины на двух платах, связанные только протоколом FCL v2 (ESP-NOW).
+Основной режим контроллера — **прямой** (`direct_core.c`, раздел 0). Раздел 2 — DC-DC вариант
+(`charger_core.c`, приложение). Кубик (раздел 1) одинаков для обоих; в прямом режиме BHM/BCP max = **100 В**
+(а не 275 В) и BCP заполняется из REQUEST (правки 15–17, INTEGRATION §5).
+
+## 0. Контроллер, прямой режим (`direct_core_step`, 10 Гц)
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> ARMED: enable, связь с кубиком, обе JBD в норме
+    ARMED --> IDLE: связь пропала / enable снят
+    ARMED --> INSUL: сессия HANDSHAKE..PARAM
+    note right of INSUL
+      K-BAT РАЗОМКНУТ: станция проверяет изоляцию
+      (до BHM = 100 В на inlet), затем разряжает выход
+    end note
+    INSUL --> CLOSE: PARAM (CRM 0xAA) + CML есть + Vinlet ≤ 60 В ≥ 500 мс
+    CLOSE --> CHARGING: через 300 мс Vinlet = Vпакета ±2 В → READY (кубик шлёт BRO 0xAA), сессия CHARGING
+    CLOSE --> RAMPDOWN: Vinlet ≠ Vпакета (стоп «inlet»)
+    CHARGING --> RAMPDOWN: FULL / OV / температура / OCP / станция дала больше / CST / кнопка / CC2
+    CHARGING --> RAMPDOWN: связь > 1 с, аппаратная OVP (жёсткий стоп)
+    RAMPDOWN --> DONE: |I| < 1 А (≥ 300 мс) или 2 с (жёсткий стоп: 300 мс)
+    INSUL --> DONE: любой стоп (K-BAT ещё не замыкался)
+    DONE --> IDLE: сессия кубика IDLE (пистолет вынут / сессия кончилась)
+```
+
+| Состояние | K-BAT | PERMIT | REQUEST.flags | BCL I |
+|---|---|---|---|---|
+| IDLE | 0 | 0 | DIRECT | 0 |
+| ARMED / INSUL | 0 | 1 | DIRECT, HV_PERMIT | 0 |
+| CLOSE | **1** | 1 | + READY (после проверки 300 мс) | 0 |
+| CHARGING | 1 | 1 | READY, ALLOW | регулятор: рампа 10 А/с, лимиты JBD, своё CV |
+| RAMPDOWN | 1 (до \|I\| < 1 А) | 0 | STOP + BST-причина | 0 |
+| DONE | 0 | 0 | STOP | 0 |
+
+BCL U всегда = max(65,7 В, CML min) ≤ BCP max (100 В); если CML min > 100 В — стоп «station_range»
+до замыкания K-BAT. Аппаратная OVP снимает K-BAT в том же цикле, без ожидания тока.
 
 ## 1. Кубик (FGMDCharge `sm_relay.c`) — что меняется
 

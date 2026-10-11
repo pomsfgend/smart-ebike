@@ -5,6 +5,7 @@ idf_component_register(
         "src/fc_supervisor.c"
         "src/flatpack2.c"
         "src/charger_core.c"
+        "src/direct_core.c"
         "src/charger_hw.c"
         "src/charger_link.c"
         "src/charger_task.c"

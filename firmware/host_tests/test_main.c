@@ -8,6 +8,7 @@
 #include "fc_link.h"
 #include "flatpack2.h"
 #include "charger_core.h"
+#include "direct_core.h"
 
 static int fails, checks;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -246,12 +247,13 @@ static void test_link(void)
     buf[10] ^= 0x40;
     CHECK(fcl_unpack(buf, n, &ty, &s2, &r2) == FCL_E_CRC);
     CHECK(fcl_unpack(buf, 5, &ty, &s2, &r2) == FCL_E_SHORT);
-    fcl_request_t r = { .seq = 9, .flags = FCL_RF_READY | FCL_RF_ALLOW, .bcl_mode = 1, .bcl_v = 2500, .bcl_i = 133,
+    fcl_request_t r = { .seq = 9, .flags = FCL_RF_READY | FCL_RF_ALLOW | FCL_RF_DIRECT, .bcl_mode = 1, .bcl_v = 2500, .bcl_i = 133,
         .bcs_v = 2510, .bcs_i = 120, .bhm_vmax = 2750, .cell_vmax_mv = 3412, .cell_vmax_no = 21, .tmax_c = 31,
-        .tmin_c = -2, .soc = 64, .remain_min = 40, .bst_fault = 0x0400, .batt_v = 601, .batt_i = -15 };
+        .tmin_c = -2, .soc = 64, .remain_min = 40, .bst_fault = 0x0400, .batt_v = 601, .batt_i = -15, .bcp_imax = 1000, .bcp_cell_cv = 365 };
     n = fcl_pack_request(buf, &r);
     CHECK(fcl_unpack(buf, n, &ty, &s2, &r2) == FCL_OK && ty == FCL_T_REQUEST);
     CHECK(r2.bcl_i == 133 && r2.tmin_c == -2 && r2.batt_i == -15 && r2.bst_fault == 0x0400 && r2.cell_vmax_no == 21);
+    CHECK(r2.bcp_imax == 1000 && r2.bcp_cell_cv == 365 && (r2.flags & FCL_RF_DIRECT));
     CHECK(fcl_crc16((const uint8_t *)"123456789", 9) == 0x29B1);   /* CCITT-FALSE check value */
     fcl_monitor_t m = {0};
     CHECK(fcl_monitor_age(&m, 10) == UINT32_MAX);
@@ -348,10 +350,111 @@ static void test_core(void)
 #undef STEP
 }
 
+
+static void test_direct(void)
+{
+    direct_core_t c; ds_out_t o; ds_in_t in; fcl_station_t st; fc_bms_t b[2];
+    memset(&in, 0, sizeof(in)); memset(&st, 0, sizeof(st));
+    direct_core_init(&c);
+    uint32_t t = 1000;
+    mk_bms(&b[0], 3300, 250, 0, t); mk_bms(&b[1], 3300, 250, 0, t);       /* 59.4 V */
+    in.bms = b; in.st = &st; in.link_age_ms = 50; in.cc2_ok = true; in.enable = true;
+    st.flags = FCL_SF_CAN_ALIVE;
+#define DSTEP() do { t += 100; b[0].rx_ms = b[1].rx_ms = t; direct_core_step(&c, &in, t, &o); } while (0)
+    /* BCL voltage helper: never below CML min, never above our BCP max */
+    st.flags |= FCL_SF_CML_VALID; st.cml_vmin = 1000; st.cml_vmax = 7500;
+    CHECK(direct_bcl_voltage(&st) == 1000);
+    st.cml_vmin = 500; CHECK(direct_bcl_voltage(&st) == FC_PACK_CV_0P1V);
+    st.cml_vmin = 2000; CHECK(direct_bcl_voltage(&st) == 0);               /* > BCP max 100 V */
+    st.cml_vmin = 1000; st.cml_imax = 2500; st.cml_imin = 0;
+    st.flags = FCL_SF_CAN_ALIVE;                                            /* CML not yet seen */
+    DSTEP(); CHECK(c.state == DS_ARMED && !o.kbat && o.hv_permit && o.req.bcl_i == 0);
+    CHECK((o.req.flags & FCL_RF_DIRECT) && o.req.bhm_vmax == FC_D_BCP_VMAX_0P1V && o.req.bcp_imax == 1000);
+    CHECK(o.req.bcp_cell_cv == 365 && o.req.batt_v == 594 && !(o.req.flags & FCL_RF_READY));
+    /* handshake / insulation check: K-BAT stays open, the inlet sees the IMD voltage */
+    st.session = FCL_SESS_HANDSHAKE; in.vinlet_0p1v = 1000; DSTEP(); DSTEP();
+    CHECK(c.state == DS_INSUL && !o.kbat);
+    st.session = FCL_SESS_PARAM; st.flags |= FCL_SF_CML_VALID; DSTEP();
+    CHECK(c.state == DS_INSUL && !o.kbat);                                  /* inlet still 100 V */
+    in.vinlet_0p1v = 30; for (int i = 0; i < 7; ++i) DSTEP();               /* discharged */
+    CHECK(c.state == DS_CLOSE && o.kbat && !(o.req.flags & FCL_RF_READY));
+    in.vinlet_0p1v = 594; for (int i = 0; i < 3; ++i) DSTEP();
+    CHECK(c.state == DS_CLOSE && o.kbat && (o.req.flags & FCL_RF_READY));  /* -> BRO 0xAA */
+    CHECK(o.req.bcl_v == 1000 && o.req.bcl_mode == 0x02 && o.req.bcl_i == 0);
+    st.session = FCL_SESS_CHARGING; st.flags |= FCL_SF_CCS_VALID | FCL_SF_CCS_PERMIT; DSTEP();
+    CHECK(c.state == DS_CHARGING && (o.req.flags & FCL_RF_ALLOW));
+    /* ramp to 100 A at 10 A/s; the "station" delivers what we ask, split between packs */
+    for (int i = 0; i < 120; ++i) {
+        DSTEP(); st.ccs_i = o.req.bcl_i;
+        b[0].current_10ma = b[1].current_10ma = (int32_t)o.req.bcl_i * 10 / 2;
+    }
+    CHECK(o.req.bcl_i == 1000 && o.kbat && c.stop == FC_STOP_NONE);
+    CHECK(o.req.bcs_i == 1000 && o.req.batt_i == 1000);
+    /* user cap 45 A (below the 50 A that aborted with the factory firmware) */
+    in.user_i_max_0p1a = 450; DSTEP(); CHECK(o.req.bcl_i == 450);
+    in.user_i_max_0p1a = 0;
+    /* hot pack: 47 C -> 50 % */
+    b[0].ntc_dc[0] = 470; DSTEP(); CHECK(o.req.bcl_i <= 500 + 5);
+    b[0].ntc_dc[0] = 250;
+    /* station overshoot: CCS 80 A while we ask 50 -> stop after 2 s */
+    for (int i = 0; i < 25; ++i) { DSTEP(); st.ccs_i = 800; b[0].current_10ma = b[1].current_10ma = 4000; }
+    CHECK(c.stop == FC_STOP_OVERCURRENT && c.state != DS_CHARGING && o.req.bcl_i == 0 && (o.req.flags & FCL_RF_STOP));
+    CHECK(o.req.bst_error == 0x01);
+    st.ccs_i = 0; b[0].current_10ma = b[1].current_10ma = 0;
+    DSTEP(); DSTEP(); DSTEP(); DSTEP();
+    CHECK(c.state == DS_DONE && !o.kbat && !o.hv_permit);
+    /* re-arm only after enable off / session idle */
+    st.session = FCL_SESS_IDLE; st.flags = FCL_SF_CAN_ALIVE; in.enable = false; DSTEP();
+    CHECK(c.state == DS_IDLE);
+    in.enable = true; DSTEP(); CHECK(c.state == DS_ARMED);
+    /* full run to CV: pack at 65.8 V -> current is reduced, then terminates */
+    st.session = FCL_SESS_PARAM; st.flags |= FCL_SF_CML_VALID | FCL_SF_CCS_VALID; in.vinlet_0p1v = 0; DSTEP();
+    for (int i = 0; i < 6; ++i) DSTEP();
+    CHECK(c.state == DS_CLOSE);
+    mk_bms(&b[0], 3655, 250, 0, t); mk_bms(&b[1], 3655, 250, 0, t);       /* 65.79 V */
+    in.vinlet_0p1v = 657; for (int i = 0; i < 3; ++i) DSTEP();
+    st.session = FCL_SESS_CHARGING; DSTEP(); CHECK(c.state == DS_CHARGING);
+    for (int i = 0; i < 20; ++i) { DSTEP(); st.ccs_i = o.req.bcl_i; b[0].current_10ma = b[1].current_10ma = (int32_t)o.req.bcl_i * 5; }
+    CHECK(o.req.bcl_i <= FC_TERM_I_0P1A);                                   /* held at taper/term */
+    for (int i = 0; i < 610; ++i) { DSTEP(); b[0].current_10ma = b[1].current_10ma = 50; }
+    CHECK(c.stop == FC_STOP_FULL && o.req.bst_reason == 0x01);
+    /* link lost while charging -> hard stop, K-BAT open within 300 ms */
+    direct_core_init(&c); in.link_age_ms = 50; st.session = FCL_SESS_IDLE; DSTEP(); CHECK(c.state == DS_ARMED);
+    mk_bms(&b[0], 3300, 250, 0, t); mk_bms(&b[1], 3300, 250, 0, t);
+    st.session = FCL_SESS_PARAM; in.vinlet_0p1v = 0; for (int i = 0; i < 8; ++i) DSTEP();
+    in.vinlet_0p1v = 594; for (int i = 0; i < 3; ++i) DSTEP();
+    st.session = FCL_SESS_CHARGING; DSTEP(); CHECK(c.state == DS_CHARGING);
+    b[0].current_10ma = b[1].current_10ma = 2000;
+    in.link_age_ms = FCL_STOP_MS + 1; DSTEP();
+    CHECK(c.state == DS_RAMPDOWN && c.stop == FC_STOP_LINK_LOST && o.kbat);
+    DSTEP(); DSTEP(); DSTEP();
+    CHECK(c.state == DS_DONE && !o.kbat);                                   /* current still 40 A */
+    /* contactor check fails (inlet != pack after closing) */
+    direct_core_init(&c); in.link_age_ms = 50; st.session = FCL_SESS_IDLE; DSTEP();
+    st.session = FCL_SESS_PARAM; in.vinlet_0p1v = 0; for (int i = 0; i < 8; ++i) DSTEP();
+    CHECK(c.state == DS_CLOSE);
+    for (int i = 0; i < 3; ++i) DSTEP();
+    CHECK(c.stop == FC_STOP_INLET && !(o.req.flags & FCL_RF_READY));
+    /* hardware OVP opens K-BAT immediately */
+    direct_core_init(&c); st.session = FCL_SESS_IDLE; DSTEP();
+    st.session = FCL_SESS_PARAM; in.vinlet_0p1v = 0; for (int i = 0; i < 8; ++i) DSTEP();
+    in.vinlet_0p1v = 594; for (int i = 0; i < 3; ++i) DSTEP();
+    st.session = FCL_SESS_CHARGING; DSTEP(); CHECK(c.state == DS_CHARGING);
+    in.hw_ovp = true; DSTEP();
+    CHECK(!o.kbat && c.stop == FC_STOP_HW_OVP);
+    in.hw_ovp = false;
+    /* station whose minimum voltage is above our BCP max: never close K-BAT */
+    direct_core_init(&c); st.session = FCL_SESS_IDLE; st.cml_vmin = 2000; DSTEP();
+    st.session = FCL_SESS_HANDSHAKE; st.flags |= FCL_SF_CML_VALID; DSTEP(); DSTEP();
+    CHECK(c.stop == FC_STOP_STATION_RANGE && !o.kbat);
+    st.cml_vmin = 1000;
+#undef DSTEP
+}
+
 int main(void)
 {
     test_ids(); test_codec(); test_tp(); test_jbd(); test_limits(); test_hv_request(); test_supervisor();
-    test_link(); test_fp2(); test_core();
+    test_link(); test_fp2(); test_core(); test_direct();
     printf("%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

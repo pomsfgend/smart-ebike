@@ -1,6 +1,7 @@
 #pragma once
 /*
- * Cube <-> charger link protocol ("FCL"), version 1.
+ * Cube <-> charger link protocol ("FCL"), version 2 (v2 = direct mode fields, see
+ * docs/DIRECT_MODE.md; v1 frames are rejected with FCL_E_VERSION).
  *
  *   Cube  (FGMDCharge, ESP32-C3, talks to the station)   --STATION 10 Hz-->  charger ESP
  *   Charger ESP (BMS, PSUs, battery contactor)           --REQUEST 10 Hz-->  cube
@@ -25,7 +26,7 @@
 
 #define FCL_MAGIC0      0x46u   /* 'F' */
 #define FCL_MAGIC1      0x43u   /* 'C' */
-#define FCL_VERSION     1u
+#define FCL_VERSION     2u
 #define FCL_PERIOD_MS   100u
 #define FCL_PAUSE_MS    300u
 #define FCL_STOP_MS     1000u
@@ -66,6 +67,7 @@ typedef struct {
 #define FCL_RF_ALLOW       (1u << 1)   /* charge allowed (BSM byte 7 bits 5-6 = 01)    */
 #define FCL_RF_STOP        (1u << 2)   /* request session stop with bst_* below        */
 #define FCL_RF_HV_PERMIT   (1u << 3)   /* charger permit for K5/K6 (also hard-wired)   */
+#define FCL_RF_DIRECT      (1u << 4)   /* direct mode: BCP/BCS use batt_v/batt_i/bcp_* verbatim */
 
 typedef struct {
     uint16_t seq;
@@ -74,7 +76,7 @@ typedef struct {
     uint8_t  bcl_mode;       /* 0x01 CV, 0x02 CC                                    */
     uint16_t bcl_v, bcl_i;   /* request to the station (HV side)                   */
     uint16_t bcs_v, bcs_i;   /* "measured" values for BCS (HV side, from PSU telemetry) */
-    uint16_t bhm_vmax;       /* BHM / BCP max total voltage (HV side)              */
+    uint16_t bhm_vmax;       /* BHM max allowed V = BCP max total charge voltage   */
     uint16_t cell_vmax_mv;   /* real                                               */
     uint8_t  cell_vmax_no;
     int8_t   tmax_c, tmin_c;
@@ -85,8 +87,11 @@ typedef struct {
     uint8_t  bst_reason;
     uint16_t bst_fault;
     uint8_t  bst_error;
-    uint16_t batt_v;         /* real LV battery, 0.1 V (diagnostics / UI)          */
-    int16_t  batt_i;         /* real LV battery, 0.1 A                              */
+    uint16_t batt_v;         /* real battery voltage, 0.1 V (direct: BCP SPN2822 + BCS) */
+    int16_t  batt_i;         /* real LV battery, 0.1 A (+ = charge)                 */
+    /* v2 */
+    uint16_t bcp_imax;       /* BCP max allowed charge current, 0.1 A magnitude    */
+    uint16_t bcp_cell_cv;    /* BCP max allowed cell voltage, 0.01 V (365 = 3.65 V) */
 } fcl_request_t;
 
 uint16_t fcl_crc16(const uint8_t *d, size_t n);   /* CRC-16/CCITT-FALSE */

@@ -4,8 +4,10 @@
  *   bms_task  : JBD #1 / #2 alternately (UART0 / UART1)
  *   can_task  : Flatpack2 RX, login keep-alive, default-voltage programming
  *   ctrl_task : 10 Hz charger_core_step -> outputs, Flatpack setpoint, REQUEST to the cube
+ * FC_POWER_MODE_DIRECT (default): no can_task, ctrl_task runs direct_core_step instead.
  */
 #include "charger_core.h"
+#include "direct_core.h"
 #include "charger_hw.h"
 #include "charger_link.h"
 #include "fc_config.h"
@@ -125,12 +127,59 @@ static void ctrl_task(void *arg)
     }
 }
 
+#if FC_POWER_MODE == FC_POWER_MODE_DIRECT
+static void ctrl_task_direct(void *arg)
+{
+    (void)arg;
+    static direct_core_t core;
+    direct_core_init(&core);
+    ds_state_t prev = DS_IDLE;
+    bool stop_latch = false;
+    TickType_t wake = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelayUntil(&wake, pdMS_TO_TICKS(FC_TASK_PERIOD_MS));
+        uint32_t now = fc_now_ms();
+        fc_bms_t bms[2];
+        fc_lock(); memcpy(bms, s_bms, sizeof(bms)); fc_unlock();
+        fcl_station_t st;
+        ds_in_t in; memset(&in, 0, sizeof(in));
+        uint32_t age = clink_station(&st);
+        in.bms = bms; in.st = (age == UINT32_MAX) ? NULL : &st; in.link_age_ms = age;
+        in.vinlet_0p1v = chw_vstack_0p1v();
+        in.hw_ovp = chw_hw_ovp_tripped();
+        in.cc2_ok = chw_cc2_ok();
+        /* auto-arm. BOOT button = stop; the latch clears only when the station CAN goes silent
+           (connector removed), so a user stop never restarts the same session by itself. */
+        if (chw_user_button()) stop_latch = true;
+        if (in.st && !(st.flags & FCL_SF_CAN_ALIVE) && st.session == FCL_SESS_IDLE) stop_latch = false;
+        in.user_stop = stop_latch;
+        in.enable = !stop_latch;
+        ds_out_t o;
+        direct_core_step(&core, &in, now, &o);
+        chw_set_outputs(o.kbat, o.hv_permit, false);
+        clink_send_request(&o.req);
+        clink_tick(now, core.state == DS_IDLE);
+        if (core.state != prev) {
+            FC_LOGI(TAG, "%s -> %s (stop=%s, Vbat=%u, Vinlet=%u, Ireq=%u)", direct_state_name(prev),
+                    direct_state_name(core.state), fc_stop_reason_name(core.stop), o.req.batt_v,
+                    in.vinlet_0p1v, o.req.bcl_i);
+            prev = core.state;
+        }
+    }
+}
+#endif
+
 void charger_start(void)
 {
     s_mx = xSemaphoreCreateMutex();
     chw_set_outputs(false, false, false);
     xTaskCreate(bms_task, "bms", 4096, NULL, 5, NULL);
+#if FC_POWER_MODE == FC_POWER_MODE_DIRECT
+    (void)can_task; (void)ctrl_task;
+    xTaskCreate(ctrl_task_direct, "ctrl", 6144, NULL, 7, NULL);
+#else
     xTaskCreate(can_task, "fp2", 4096, NULL, 6, NULL);
     xTaskCreate(ctrl_task, "ctrl", 6144, NULL, 7, NULL);
+#endif
 }
 #endif

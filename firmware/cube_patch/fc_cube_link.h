@@ -28,4 +28,5 @@ bool fc_cube_charge_allowed(uint32_t now_ms);    /* BSM byte 7 "charge allowed" 
 bool fc_cube_stop_requested(uint32_t now_ms, uint8_t bst[4]);
 /* BSM payload (7 bytes) built from real data, or false if the link is not fresh */
 bool fc_cube_fill_bsm(uint32_t now_ms, uint8_t d[7]);
-uint16_t fc_cube_bhm_vmax(void);                 /* 0.1 V; 2750 default                  */
+uint16_t fc_cube_bhm_vmax(void);                 /* 0.1 V; 1000 default (direct)         */
+bool fc_cube_fill_bcp(uint32_t now_ms, uint8_t b[13]);   /* DIRECT mode BCP (FCL v2)    */

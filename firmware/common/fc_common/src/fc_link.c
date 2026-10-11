@@ -56,6 +56,7 @@ size_t fcl_pack_request(uint8_t *out, const fcl_request_t *r)
     w8(&w, r->soc); w16(&w, r->remain_min); w8(&w, r->bsm_byte5);
     w8(&w, r->bst_reason); w16(&w, r->bst_fault); w8(&w, r->bst_error);
     w16(&w, r->batt_v); w16(&w, (uint16_t)r->batt_i);
+    w16(&w, r->bcp_imax); w16(&w, r->bcp_cell_cv);
     return finish(&w);
 }
 
@@ -89,6 +90,7 @@ fcl_err_t fcl_unpack(const uint8_t *in, size_t n, fcl_type_t *type, fcl_station_
         q->soc = r8(&r); q->remain_min = r16(&r); q->bsm_byte5 = r8(&r);
         q->bst_reason = r8(&r); q->bst_fault = r16(&r); q->bst_error = r8(&r);
         q->batt_v = r16(&r); q->batt_i = (int16_t)r16(&r);
+        q->bcp_imax = r16(&r); q->bcp_cell_cv = r16(&r);
         return FCL_OK;
     }
     return FCL_E_TYPE;

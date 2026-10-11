@@ -9,7 +9,7 @@
 const char *fc_stop_reason_name(fc_stop_reason_t r)
 {
     static const char *n[] = { "none", "full", "cell_ov", "pack_ov", "temp", "bms_fault",
-        "bms_lost", "dcdc_fault", "dcdc_lost", "pack_imbalance", "station_range", "cc2_lost", "user", "link_lost", "station_end", "precharge" };
+        "bms_lost", "dcdc_fault", "dcdc_lost", "pack_imbalance", "station_range", "cc2_lost", "user", "link_lost", "station_end", "precharge", "overcurrent", "inlet", "hw_ovp" };
     return (unsigned)r < sizeof(n) / sizeof(n[0]) ? n[r] : "?";
 }
 
